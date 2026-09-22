@@ -8,6 +8,8 @@
 2. 锁定 sinataoke_cn 版本到 2.0.5, 防止作者推破坏性更新
 3. 全局 asyncio.Lock 确保同时只有一个 sinataoke 子进程运行, 防止 CPU 爆炸
 4. 45 秒调用超时, 卡住的子进程会被自动清理
+5. TAOBAO_SESSION / TAOBAO_PID 必须由环境变量提供，不再在源码里硬编码兜底值
+   （公开仓库里硬编码真实凭证会导致凭证泄露）
 """
 import os
 import sys
@@ -20,16 +22,36 @@ from mcp.client.stdio import stdio_client
 sys.stdout.reconfigure(line_buffering=True)
  
 port = int(os.getenv("PORT", 8080))
+
+
+def _require_env(name: str) -> str:
+    """
+    强制要求某个环境变量必须存在且非空，否则在启动阶段就报错退出。
+    绝不打印变量的实际值（避免把凭证写进日志）。
+    """
+    value = os.getenv(name, "").strip()
+    if not value:
+        print(
+            f"[启动失败] 环境变量 {name} 未设置或为空。\n"
+            f"请在部署平台（如 Zeabur）的 Environment Variables 里配置 {name} 后重新部署。\n"
+            f"（TAOBAO_SESSION 需要通过淘宝联盟授权链接重新获取：\n"
+            f" https://oauth.taobao.com/authorize?response_type=token&client_id=34297717&state=1212&view=web ）",
+            file=sys.stderr,
+            flush=True,
+        )
+        sys.exit(1)
+    return value
+
  
 # 创建外层MCP服务器
 mcp = FastMCP(
     name="淘宝导购MCP服务器",
-    instructions="帮助转换淘宝返利链接和搜索商品",
+    instructions="帮助猫猫转换淘宝返利链接和搜索商品",
 )
  
-# 淘宝客凭证（从环境变量读取，不含默认值）
-TAOBAO_SESSION = os.environ["TAOBAO_SESSION"]
-TAOBAO_PID = os.environ["TAOBAO_PID"]
+# 淘宝客凭证 —— 必须来自环境变量，不再在源码中硬编码兜底值
+TAOBAO_SESSION = _require_env("TAOBAO_SESSION")
+TAOBAO_PID = _require_env("TAOBAO_PID")
  
 # 锁定 sinataoke_cn 版本, 防止作者推破坏性更新
 SINATAOKE_VERSION = "2.0.5"
@@ -52,7 +74,7 @@ def _parse_search_result(raw: str, count: int) -> str:
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
-        return raw
+        return raw  # 解析失败就原样返回，至少不崩
  
     items = (
         data.get("result_list", {})
@@ -70,6 +92,7 @@ def _parse_search_result(raw: str, count: int) -> str:
         final_price = price_info.get("final_promotion_price", "")
         original_price = price_info.get("zk_final_price", "")
  
+        # 促销标签：只取文字，逗号拼接
         tags = [
             t.get("tag_name", "")
             for t in price_info.get("promotion_tag_list", {})
@@ -78,6 +101,7 @@ def _parse_search_result(raw: str, count: int) -> str:
         ]
         promo = "、".join(tags) if tags else ""
  
+        # 返利链接补全协议头
         click_url = publish.get("click_url", "")
         if click_url and click_url.startswith("//"):
             click_url = "https:" + click_url
@@ -212,4 +236,3 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=port,
     )
- 
